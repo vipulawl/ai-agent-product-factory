@@ -6,7 +6,7 @@ An autonomous multi-agent pipeline that discovers developer pain points in the A
 
 ```
 Discovery Agent (every 6h)
-  └─▶ scrapes Reddit, HN, GitHub Discussions
+  └─▶ scrapes Reddit, HN, GitHub Issues
   └─▶ GPT-4o extracts and clusters pain points into themes
   └─▶ writes to SQLite backlog
 
@@ -14,18 +14,21 @@ Priority Agent (after each discovery run)
   └─▶ scores each theme: frequency × novelty × feasibility × recency × market
   └─▶ ranks backlog
 
-Builder Agent (daily)
+Builder Agent (daily 9am)
   └─▶ picks top-ranked unbuilt item
-  └─▶ sends Telegram: "Ready to build X — reply YES to proceed"
+  └─▶ sends Telegram: "Ready to build X — reply YES <token> to proceed"
   └─▶ waits for your approval (up to 24h)
-  └─▶ GPT-4o generates full project (code, README, tests, CI)
+  └─▶ GPT-4o generates full project (code, README, tests, .gitignore)
   └─▶ pushes to github.com/vipulawl/<repo-name>
-  └─▶ sends Telegram build complete notification
+  └─▶ sends Telegram build-complete notification
 
-Refiner Agent (weekly)
-  └─▶ reviews built products for improvements
-  └─▶ opens PRs with enhancements
-  └─▶ replies to original Reddit/HN threads announcing the tool
+Refiner Agent (every Monday)
+  └─▶ reviews built products, opens GitHub enhancement issues
+  └─▶ generates outreach messages for original Reddit/HN threads
+  └─▶ sends outreach drafts to you via Telegram
+
+Daily Digest (8am)
+  └─▶ Telegram summary: posts scraped, themes added, top backlog items
 ```
 
 ## Setup
@@ -35,59 +38,53 @@ Refiner Agent (weekly)
 ```bash
 git clone https://github.com/vipulawl/ai-agent-product-factory
 cd ai-agent-product-factory
-git submodule update --init --recursive  # pulls Hermes
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e hermes/  # install Hermes as library
 ```
 
 ### 2. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env with your API keys (see section below)
+# Fill in all values — see table below
 ```
 
-### 3. Telegram bot setup
+### 3. Telegram bot
 
-1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot`
-2. Copy the bot token → `TELEGRAM_BOT_TOKEN` in `.env`
-3. Start a chat with your new bot, send any message
-4. Run `python scripts/get_chat_id.py` to get your `TELEGRAM_CHAT_ID`
+1. Message [@BotFather](https://t.me/BotFather) → `/newbot`
+2. Copy the token → `TELEGRAM_BOT_TOKEN` in `.env`
+3. Send any message to your new bot
+4. Run `python scripts/get_chat_id.py` → paste result into `TELEGRAM_CHAT_ID`
 
-### 4. Reddit API setup
+### 4. Reddit API
 
 1. Go to https://www.reddit.com/prefs/apps → "create another app"
 2. Type: **script**, redirect URI: `http://localhost:8080`
 3. Copy Client ID and Secret → `.env`
 
-### 5. Hermes gateway (optional — for richer Telegram experience)
+### 5. GitHub token (vipulawl account)
 
-```bash
-cd hermes
-hermes gateway setup  # choose Telegram, paste same bot token
-hermes gateway start  # runs in background
-# Copy our hook into Hermes so it handles incoming approvals:
-cp ../hermes_integration/approval_hook.py ~/.hermes/hermes-agent/gateway/builtin_hooks/
-```
-
-Without Hermes gateway: the pipeline uses its own Telegram poller for receiving replies.
+Generate a PAT at https://github.com/settings/tokens with `repo` scope on the `vipulawl` account → `GITHUB_TOKEN` in `.env`
 
 ### 6. Run
 
 ```bash
-# Run all agents once (good for testing)
+# Test a full run immediately
 python orchestrator.py --run-now
 
-# Start the scheduler (runs continuously on cron)
+# Start the scheduler (runs continuously)
 python orchestrator.py
 
 # Run individual agents
-python -m agents.discovery_agent
-python -m agents.priority_agent
-python -m agents.builder_agent
-python -m agents.refiner_agent
+python orchestrator.py --discovery
+python orchestrator.py --priority
+python orchestrator.py --builder
+python orchestrator.py --refiner
+python orchestrator.py --digest
+
+# Check pipeline status
+python scripts/status.py
 ```
 
 ## Environment Variables
@@ -96,12 +93,29 @@ python -m agents.refiner_agent
 |---|---|---|
 | `OPENAI_API_KEY` | ✅ | GPT-4o for all agent reasoning |
 | `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | ✅ | Your personal chat ID with the bot |
-| `GITHUB_TOKEN` | ✅ | GitHub PAT with `repo` scope (for vipulawl account) |
+| `TELEGRAM_CHAT_ID` | ✅ | Your personal chat ID (run `scripts/get_chat_id.py`) |
+| `GITHUB_TOKEN` | ✅ | vipulawl PAT with `repo` scope |
 | `REDDIT_CLIENT_ID` | ✅ | Reddit app client ID |
 | `REDDIT_CLIENT_SECRET` | ✅ | Reddit app secret |
 | `REDDIT_USER_AGENT` | ✅ | e.g. `ai-factory:v1.0 (by /u/yourname)` |
-| `HERMES_GATEWAY_URL` | optional | `http://localhost:8642` if using Hermes gateway |
+
+## Approval Flow
+
+When the builder picks an item, you get a Telegram message like:
+
+```
+🔨 Ready to Build
+
+Agent Debugging Replay Tool
+Developers can't replay failed agent runs step-by-step...
+
+Priority score: 7.8/10
+
+Reply YES A3F9B2C1 to proceed.
+Reply /reject A3F9B2C1 to skip.
+```
+
+Reply `YES A3F9B2C1` (or `APPROVE A3F9B2C1`) in Telegram. The builder polls every 60 seconds.
 
 ## File Structure
 
@@ -109,28 +123,25 @@ python -m agents.refiner_agent
 ai-agent-product-factory/
 ├── orchestrator.py          # Main scheduler and coordinator
 ├── agents/
-│   ├── discovery_agent.py   # Scrapes Reddit/HN/GitHub, extracts pain points
+│   ├── base.py              # OpenAI client + Telegram send/poll helpers
+│   ├── discovery_agent.py   # Scrapes Reddit/HN/GitHub, extracts themes
 │   ├── priority_agent.py    # Scores and ranks backlog items
-│   ├── builder_agent.py     # Builds products, pushes GitHub, Telegram approval
-│   └── refiner_agent.py     # Improves products, does outreach
+│   ├── builder_agent.py     # Builds products, approval gate, GitHub push
+│   └── refiner_agent.py     # Improves products, generates outreach
 ├── storage/
 │   └── backlog.py           # SQLite schema + CRUD (data/backlog.db)
 ├── config/
 │   ├── sources.yaml         # Subreddits, HN searches, GitHub repos to monitor
-│   └── priority_rules.yaml  # Scoring weights
-├── hermes_integration/
-│   └── approval_hook.py     # Hermes builtin_hook for routing Telegram replies
-├── skills/
-│   └── factory_status.md    # Hermes skill: browse backlog via chat
-├── scripts/
-│   └── get_chat_id.py       # Helper to find your Telegram chat ID
-└── builds/                  # Generated project files (before GitHub push)
+│   └── priority_rules.yaml  # Scoring weights and thresholds
+└── scripts/
+    ├── status.py            # Print pipeline status
+    └── get_chat_id.py       # Find your Telegram chat ID
 ```
 
 ## Costs
 
-- GPT-4o: discovery runs ~$0.05–0.15/run (depending on posts scraped), builder run ~$0.20–0.50
-- Reddit/HN APIs: free
-- GitHub API: free within rate limits
+- GPT-4o: ~$0.05–0.15 per discovery run, ~$0.20–0.50 per build
+- Reddit/HN/GitHub APIs: free
+- Telegram Bot API: free
 
-Daily cost estimate: ~$0.30–0.80 (4 discovery + 1 builder + 1 priority per day)
+Estimated daily spend: ~$0.30–0.80
