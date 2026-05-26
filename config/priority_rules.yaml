@@ -1,0 +1,19 @@
+# Scoring weights — must sum to 1.0
+weights:
+  frequency: 0.25      # how many devs mention this pain
+  novelty: 0.25        # no good solution exists yet (higher = more novel)
+  feasibility: 0.20    # buildable by 1 dev in ~1 week
+  recency: 0.15        # mentioned recently (last 7 days scores highest)
+  market_size: 0.15    # how large is the affected developer segment
+
+# Thresholds
+min_priority_to_build: 6.0   # out of 10 — don't build below this
+min_frequency_count: 3       # theme must appear in at least N raw posts
+
+# Builder limits
+max_builds_per_week: 2
+approval_timeout_hours: 24   # how long to wait for your Telegram approval
+
+# Refiner
+refine_after_days: 7         # wait this many days after build before refining
+max_outreach_per_build: 5    # max Reddit/HN posts to reply to per built product

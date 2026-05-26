@@ -1,0 +1,55 @@
+reddit:
+  subreddits:
+    - MachineLearning
+    - artificial
+    - LocalLLaMA
+    - langchain
+    - AutoGPT
+    - AIAgents
+    - learnmachinelearning
+    - programming
+    - softwareengineering
+  search_terms:
+    - "AI agent"
+    - "coding agent"
+    - "LLM agent problem"
+    - "tool calling issue"
+    - "agent debugging"
+    - "wish there was"
+    - "annoying when my agent"
+    - "agent keeps failing"
+    - "autonomous agent"
+  posts_per_search: 25
+  time_filter: week   # new | hour | day | week | month | year | all
+
+hackernews:
+  search_queries:
+    - "AI agent"
+    - "LLM agent"
+    - "coding agent"
+    - "autonomous agent"
+    - "tool calling"
+    - "function calling agent"
+    - "agent framework"
+  min_score: 3
+  max_results: 30
+
+github:
+  repos_to_watch:
+    - langchainai/langchain
+    - microsoft/autogen
+    - crewAIInc/crewAI
+    - openai/openai-agents-python
+    - Significant-Gravitas/AutoGPT
+    - microsoft/semantic-kernel
+    - run-llama/llama_index
+    - pydantic/pydantic-ai
+    - BerriAI/litellm
+    - fixie-ai/ultravox
+  issue_labels:
+    - bug
+    - enhancement
+    - question
+    - help wanted
+  max_issues_per_repo: 15
+  max_discussions_per_repo: 10
