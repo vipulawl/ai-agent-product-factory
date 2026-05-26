@@ -222,29 +222,40 @@ def notify_complete(item: dict, design: dict, github_url: str):
     send_telegram(msg)
 
 
-def run() -> dict:
-    from storage.backlog import init_db, get_top_item, set_item_status, record_build, mark_build_notified
+def run(no_approval_wait: bool = False) -> dict:
+    from storage.backlog import init_db, get_top_item, get_pending_backlog, set_item_status, record_build, mark_build_notified
 
     init_db()
     rules = load_rules()
     min_score = rules.get("min_priority_to_build", 6.0)
     timeout_hours = rules.get("approval_timeout_hours", 24)
 
-    item = get_top_item(min_score=min_score)
+    # Allow CI to specify a particular item via env var
+    item_id = os.environ.get("BUILD_ITEM_ID", "").strip()
+    if item_id:
+        items = [i for i in get_pending_backlog(0) if str(i["id"]) == item_id]
+        item = items[0] if items else None
+    else:
+        item = get_top_item(min_score=min_score)
+
     if not item:
         log.info("No buildable items in backlog (below min priority or none pending)")
         return {"built": False, "reason": "nothing_to_build"}
 
     log.info(f"Top item: [{item['id']}] {item['title']} (score={item['priority_score']})")
 
-    # Request Telegram approval
-    token = request_approval(item)
-    approved = wait_for_approval(token, timeout_hours=timeout_hours)
-
-    if not approved:
-        log.info(f"Item {item['id']} not approved — skipping")
-        set_item_status(item["id"], "skipped")
-        return {"built": False, "reason": "not_approved", "item": item["title"]}
+    if no_approval_wait:
+        # Running via GitHub Actions — triggering the workflow is the approval
+        from agents.base import send_telegram
+        send_telegram(f"🏗️ *Building now (CI triggered)*\n\n*{item['title']}*\nScore: `{item['priority_score']}/10`")
+    else:
+        # Request Telegram approval and wait
+        token = request_approval(item)
+        approved = wait_for_approval(token, timeout_hours=timeout_hours)
+        if not approved:
+            log.info(f"Item {item['id']} not approved — skipping")
+            set_item_status(item["id"], "skipped")
+            return {"built": False, "reason": "not_approved", "item": item["title"]}
 
     log.info(f"Approved! Building {item['title']}...")
     set_item_status(item["id"], "building")

@@ -1,0 +1,44 @@
+name: Build Product
+
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: 'Backlog item ID to build (leave blank to auto-pick top item)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore backlog DB
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: backlog-${{ github.run_id }}
+          restore-keys: backlog-
+
+      - name: Install git identity
+        run: |
+          git config --global user.email "factory@vipulawl.com"
+          git config --global user.name "AI Product Factory"
+
+      - run: pip install -r requirements.txt
+
+      - name: Build product
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          BUILD_ITEM_ID: ${{ github.event.inputs.item_id }}
+        run: |
+          # Skip approval wait in CI — triggering this workflow IS the approval
+          python orchestrator.py --builder --no-approval-wait

@@ -47,11 +47,11 @@ def run_priority():
         log.error(f"Priority agent failed: {e}", exc_info=True)
 
 
-def run_builder():
+def run_builder(no_approval_wait: bool = False):
     log.info("=== Builder Agent starting ===")
     try:
         from agents.builder_agent import run
-        result = run()
+        result = run(no_approval_wait=no_approval_wait)
         log.info(f"Builder complete: {result}")
     except Exception as e:
         log.error(f"Builder agent failed: {e}", exc_info=True)
@@ -148,6 +148,7 @@ def main():
     parser.add_argument("--discovery", action="store_true", help="Run only discovery agent")
     parser.add_argument("--priority", action="store_true", help="Run only priority agent")
     parser.add_argument("--builder", action="store_true", help="Run only builder agent")
+    parser.add_argument("--no-approval-wait", action="store_true", help="Skip Telegram approval gate (for CI/GitHub Actions)")
     parser.add_argument("--refiner", action="store_true", help="Run only refiner agent")
     parser.add_argument("--digest", action="store_true", help="Send daily digest now")
     args = parser.parse_args()
@@ -165,7 +166,7 @@ def main():
         run_priority()
         return
     if args.builder:
-        run_builder()
+        run_builder(no_approval_wait=args.no_approval_wait)
         return
     if args.refiner:
         run_refiner()
