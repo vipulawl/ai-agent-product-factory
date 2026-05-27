@@ -128,8 +128,14 @@ def init_db():
 
 
 def _migrate(conn):
-    """Add columns introduced after initial schema without dropping existing data."""
-    migrations = [
+    """Idempotent migrations — safe to run every startup."""
+    # Rename theme_id → cluster_id on backlog_items (schema v1 → v2)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(backlog_items)").fetchall()]
+    if "theme_id" in cols and "cluster_id" not in cols:
+        conn.execute("ALTER TABLE backlog_items RENAME COLUMN theme_id TO cluster_id")
+
+    # Add new columns introduced in later versions
+    new_cols = [
         ("pain_points", "is_promotional",    "INTEGER DEFAULT 0"),
         ("pain_points", "solution_mentioned", "TEXT"),
         ("pain_points", "solution_adequate",  "INTEGER DEFAULT 0"),
@@ -137,7 +143,7 @@ def _migrate(conn):
         ("clusters",    "promo_count",        "INTEGER DEFAULT 0"),
         ("clusters",    "known_solutions",    "TEXT DEFAULT '[]'"),
     ]
-    for table, col, col_def in migrations:
+    for table, col, col_def in new_cols:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
         except sqlite3.OperationalError:
