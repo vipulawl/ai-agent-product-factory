@@ -1,5 +1,6 @@
 """
-Scores and ranks backlog items using GPT-4o and weighted rules.
+Scores backlog items using GPT-4o. Uses the full synthesis narrative + source diversity
+so cross-platform problems score higher than single-source ones.
 """
 
 import json
@@ -11,31 +12,36 @@ log = logging.getLogger(__name__)
 
 RULES_PATH = Path(__file__).parent.parent / "config" / "priority_rules.yaml"
 
-SCORE_PROMPT = """You are a product prioritization expert for developer tools. Score these backlog items for AI agent developer tooling.
+SCORE_PROMPT = """You are a product prioritisation expert for developer tools targeting AI agent builders.
 
-Scoring criteria (each 0–10):
-- frequency_score: How many developers face this? (10 = universal pain)
-- novelty_score: How underserved is this? (10 = no good solution exists)
-- feasibility_score: Buildable standalone by 1 dev in ~1 week? (10 = very feasible)
-- recency_score: How recently is this mentioned? (10 = trending right now)
-- market_score: Size of affected developer segment? (10 = all AI/agent devs)
+Score these backlog items. Each item includes a synthesis narrative built from real developer complaints.
+
+Scoring (each 0–10):
+- frequency_score: How many developers face this? (use evidence_count as signal — 10+ mentions = 9-10)
+- novelty_score: How underserved is this? Does a good open-source solution exist? (10 = nothing usable exists)
+- feasibility_score: Buildable standalone by 1 dev in ~1 week as a useful tool? (10 = very doable)
+- recency_score: Is this being complained about actively right now? (10 = mentioned in last 7 days)
+- market_score: What fraction of AI/agent developers would use this? (10 = everyone building agents)
+
+Priority = weighted average (see weights). Scores are per-item, not relative rankings.
+Items appearing on Reddit + HN + GitHub simultaneously should score higher on frequency and market.
 
 Return JSON:
 {
   "scores": [
     {
-      "item_id": <id>,
-      "frequency_score": 7,
-      "novelty_score": 8,
-      "feasibility_score": 6,
-      "recency_score": 9,
-      "market_score": 7,
-      "reasoning": "brief justification"
+      "item_id": 1,
+      "frequency_score": 8,
+      "novelty_score": 7,
+      "feasibility_score": 9,
+      "recency_score": 6,
+      "market_score": 8,
+      "reasoning": "14 mentions across 3 platforms, no good replay debugger exists, buildable as a CLI"
     }
   ]
 }
 
-Backlog items to score:
+Items to score:
 """
 
 
@@ -62,39 +68,38 @@ def run() -> dict:
 
     init_db()
     weights = load_weights()
-
     items = get_pending_backlog()
+
     if not items:
         log.info("No pending backlog items to score")
         return {"scored": 0}
 
-    # Score in batches of 10
-    batch_size = 10
     total_scored = 0
-
-    for i in range(0, len(items), batch_size):
-        batch = items[i:i + batch_size]
-        items_text = json.dumps([
-            {"item_id": it["id"], "title": it["title"], "description": it["description"],
-             "frequency": it.get("frequency", 0)}
+    for i in range(0, len(items), 10):
+        batch = items[i:i + 10]
+        items_payload = [
+            {
+                "item_id": it["id"],
+                "title": it["title"],
+                # Include full narrative so GPT-4o has real signal to score against
+                "synthesis_narrative": (it.get("synthesis_narrative") or it["description"] or "")[:800],
+                "evidence_count": it.get("evidence_count", 0),
+                "source_diversity": it.get("source_diversity", 1),
+                "source_breakdown": it.get("source_breakdown", "{}")
+            }
             for it in batch
-        ], indent=2)
-
+        ]
         try:
-            result = chat_json([{"role": "user", "content": SCORE_PROMPT + items_text}])
+            result = chat_json([{"role": "user", "content": SCORE_PROMPT + json.dumps(items_payload, indent=2)}])
             for score_data in result.get("scores", []):
-                item_id = score_data["item_id"]
                 score_data["priority_score"] = compute_priority(score_data, weights)
-                update_scores(item_id, score_data)
+                update_scores(score_data["item_id"], score_data)
                 total_scored += 1
-                log.info(
-                    f"Item {item_id} scored: priority={score_data['priority_score']} "
-                    f"({score_data.get('reasoning', '')})"
-                )
+                log.info(f"Item {score_data['item_id']} → priority {score_data['priority_score']} ({score_data.get('reasoning', '')})")
         except Exception as e:
-            log.error(f"Scoring batch {i//batch_size + 1} failed: {e}")
+            log.error(f"Scoring batch {i // 10 + 1} failed: {e}")
 
-    log.info(f"Scored {total_scored} backlog items")
+    log.info(f"Scored {total_scored} items")
     return {"scored": total_scored}
 
 

@@ -23,7 +23,9 @@ GITHUB_USER = "vipulawl"
 DESIGN_PROMPT = """You are a senior software engineer. Design a complete, shippable developer tool based on this pain point:
 
 Title: {title}
-Description: {description}
+
+Problem brief (built from {evidence_count} real developer complaints across {source_diversity} platforms):
+{synthesis_narrative}
 
 Return JSON:
 {{
@@ -67,13 +69,17 @@ def request_approval(item: dict) -> str:
     from storage.backlog import create_approval
 
     token = create_approval(item["id"])
+    import json as _json
+    breakdown = _json.loads(item.get("source_breakdown") or "{}")
+    sources_line = "  ".join(f"{k}: {v}" for k, v in breakdown.items()) if breakdown else "unknown"
+    narrative = (item.get("synthesis_narrative") or item.get("description") or "")[:500]
     msg = (
         f"🔨 *Ready to Build*\n\n"
-        f"*{item['title']}*\n"
-        f"{item['description'][:400]}...\n\n"
+        f"*{item['title']}*\n\n"
+        f"_{narrative}_\n\n"
+        f"Evidence: `{item.get('evidence_count', 0)}` mentions  |  Sources: {sources_line}\n"
         f"Priority score: `{item['priority_score']}/10`\n\n"
-        f"Reply `/approve {token}` or just `YES {token}` to proceed.\n"
-        f"Reply `/reject {token}` to skip this item.\n\n"
+        f"Reply `YES {token}` to build  |  `/reject {token}` to skip\n"
         f"Token expires in 24h."
     )
     send_telegram(msg)
@@ -119,7 +125,9 @@ def design_project(item: dict) -> dict:
 
     result = chat_json([{"role": "user", "content": DESIGN_PROMPT.format(
         title=item["title"],
-        description=item["description"]
+        synthesis_narrative=item.get("synthesis_narrative") or item.get("description") or "",
+        evidence_count=item.get("evidence_count", 0),
+        source_diversity=item.get("source_diversity", 1)
     )}])
     return result
 

@@ -7,87 +7,117 @@ from contextlib import contextmanager
 
 DB_PATH = Path(__file__).parent.parent / "data" / "backlog.db"
 
+SCHEMA = """
+-- Every scraped post, deduped by URL
+CREATE TABLE IF NOT EXISTS raw_posts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,          -- reddit | hackernews | github
+    source_url  TEXT UNIQUE,
+    title       TEXT,
+    content     TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+-- Atomic extracted pain points, one row per complaint
+CREATE TABLE IF NOT EXISTS pain_points (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_post_id INTEGER REFERENCES raw_posts(id),
+    description TEXT NOT NULL,
+    severity    TEXT,                   -- high | medium | low
+    source_type TEXT,
+    source_url  TEXT,
+    cluster_id  INTEGER REFERENCES clusters(id),  -- null until assigned
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+-- Each cluster is a synthesised problem theme built up over many runs
+CREATE TABLE IF NOT EXISTS clusters (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT NOT NULL,
+    synthesis_narrative  TEXT,          -- GPT-4o written brief, updated as evidence grows
+    evidence_count       INTEGER DEFAULT 0,
+    source_diversity     INTEGER DEFAULT 0,  -- count of distinct source_types contributing
+    source_breakdown     TEXT DEFAULT '{}',  -- JSON: {"reddit":5,"hackernews":2,"github":1}
+    first_seen           TEXT DEFAULT (datetime('now')),
+    last_updated         TEXT DEFAULT (datetime('now')),
+    status               TEXT DEFAULT 'growing'  -- growing | mature | ready_to_build | built
+);
+
+-- Evidence log: which pain points contributed to which cluster
+CREATE TABLE IF NOT EXISTS cluster_evidence (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id    INTEGER REFERENCES clusters(id),
+    pain_point_id INTEGER REFERENCES pain_points(id),
+    added_at      TEXT DEFAULT (datetime('now')),
+    UNIQUE(cluster_id, pain_point_id)
+);
+
+-- Backlog items derived from mature clusters
+CREATE TABLE IF NOT EXISTS backlog_items (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id        INTEGER REFERENCES clusters(id),
+    title             TEXT NOT NULL,
+    description       TEXT,
+    priority_score    REAL DEFAULT 0,
+    frequency_score   REAL DEFAULT 0,
+    novelty_score     REAL DEFAULT 0,
+    feasibility_score REAL DEFAULT 0,
+    recency_score     REAL DEFAULT 0,
+    market_score      REAL DEFAULT 0,
+    status            TEXT DEFAULT 'pending',  -- pending | building | built | skipped
+    notes             TEXT,
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now'))
+);
+
+-- Approval tokens for the builder Telegram gate
+CREATE TABLE IF NOT EXISTS approvals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token           TEXT UNIQUE NOT NULL,
+    backlog_item_id INTEGER REFERENCES backlog_items(id),
+    status          TEXT DEFAULT 'pending',  -- pending | approved | rejected
+    requested_at    TEXT DEFAULT (datetime('now')),
+    resolved_at     TEXT
+);
+
+-- Built products
+CREATE TABLE IF NOT EXISTS builds (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    backlog_item_id INTEGER REFERENCES backlog_items(id),
+    github_url      TEXT,
+    repo_name       TEXT,
+    build_summary   TEXT,
+    notified        INTEGER DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Outreach messages drafted for original thread authors
+CREATE TABLE IF NOT EXISTS outreach (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    build_id   INTEGER REFERENCES builds(id),
+    source_url TEXT,
+    message    TEXT,
+    status     TEXT DEFAULT 'pending',
+    sent_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS seen_urls (
+    url        TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS digest_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_at  TEXT DEFAULT (datetime('now')),
+    summary  TEXT
+);
+"""
+
 
 def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     with get_conn() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS raw_problems (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_type TEXT NOT NULL,
-                source_url  TEXT UNIQUE,
-                title       TEXT,
-                content     TEXT,
-                created_at  TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS themes (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                name         TEXT NOT NULL,
-                description  TEXT,
-                problem_ids  TEXT,   -- JSON array of raw_problem ids
-                frequency    INTEGER DEFAULT 0,
-                source_urls  TEXT,   -- JSON array for outreach tracking
-                created_at   TEXT DEFAULT (datetime('now')),
-                updated_at   TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS backlog_items (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                theme_id         INTEGER REFERENCES themes(id),
-                title            TEXT NOT NULL,
-                description      TEXT,
-                priority_score   REAL DEFAULT 0,
-                frequency_score  REAL DEFAULT 0,
-                novelty_score    REAL DEFAULT 0,
-                feasibility_score REAL DEFAULT 0,
-                recency_score    REAL DEFAULT 0,
-                market_score     REAL DEFAULT 0,
-                status           TEXT DEFAULT 'pending',
-                notes            TEXT,
-                created_at       TEXT DEFAULT (datetime('now')),
-                updated_at       TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS approvals (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                token           TEXT UNIQUE NOT NULL,
-                backlog_item_id INTEGER REFERENCES backlog_items(id),
-                status          TEXT DEFAULT 'pending',
-                requested_at    TEXT DEFAULT (datetime('now')),
-                resolved_at     TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS builds (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                backlog_item_id INTEGER REFERENCES backlog_items(id),
-                github_url      TEXT,
-                repo_name       TEXT,
-                build_summary   TEXT,
-                notified        INTEGER DEFAULT 0,
-                created_at      TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS outreach (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                build_id    INTEGER REFERENCES builds(id),
-                source_url  TEXT,
-                message     TEXT,
-                status      TEXT DEFAULT 'pending',
-                sent_at     TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS seen_urls (
-                url        TEXT PRIMARY KEY,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS digest_log (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                sent_at    TEXT DEFAULT (datetime('now')),
-                summary    TEXT
-            );
-        """)
+        conn.executescript(SCHEMA)
 
 
 @contextmanager
@@ -95,6 +125,7 @@ def get_conn():
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
@@ -102,12 +133,11 @@ def get_conn():
         conn.close()
 
 
-# ── raw problems ──────────────────────────────────────────────────────────────
+# ── seen URLs ─────────────────────────────────────────────────────────────────
 
 def is_seen(url: str) -> bool:
     with get_conn() as conn:
-        row = conn.execute("SELECT 1 FROM seen_urls WHERE url = ?", (url,)).fetchone()
-        return row is not None
+        return conn.execute("SELECT 1 FROM seen_urls WHERE url=?", (url,)).fetchone() is not None
 
 
 def mark_seen(url: str):
@@ -115,50 +145,152 @@ def mark_seen(url: str):
         conn.execute("INSERT OR IGNORE INTO seen_urls (url) VALUES (?)", (url,))
 
 
-def insert_raw_problem(source_type: str, source_url: str, title: str, content: str) -> int:
+# ── raw posts ─────────────────────────────────────────────────────────────────
+
+def insert_raw_post(source_type: str, source_url: str, title: str, content: str) -> int | None:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO raw_problems (source_type, source_url, title, content) VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO raw_posts (source_type, source_url, title, content) VALUES (?,?,?,?)",
             (source_type, source_url, title, content)
         )
-        return cur.lastrowid
+        return cur.lastrowid if cur.lastrowid else None
 
 
-# ── themes ────────────────────────────────────────────────────────────────────
+# ── pain points ───────────────────────────────────────────────────────────────
 
-def upsert_theme(name: str, description: str, problem_ids: list, source_urls: list) -> int:
+def insert_pain_point(raw_post_id: int, description: str, severity: str,
+                       source_type: str, source_url: str) -> int:
     with get_conn() as conn:
-        existing = conn.execute("SELECT id, frequency FROM themes WHERE name = ?", (name,)).fetchone()
-        now = datetime.utcnow().isoformat()
-        if existing:
-            conn.execute(
-                "UPDATE themes SET description=?, problem_ids=?, source_urls=?, frequency=?, updated_at=? WHERE id=?",
-                (description, json.dumps(problem_ids), json.dumps(source_urls), len(problem_ids), now, existing["id"])
-            )
-            return existing["id"]
         cur = conn.execute(
-            "INSERT INTO themes (name, description, problem_ids, source_urls, frequency) VALUES (?,?,?,?,?)",
-            (name, description, json.dumps(problem_ids), json.dumps(source_urls), len(problem_ids))
+            "INSERT INTO pain_points (raw_post_id, description, severity, source_type, source_url) VALUES (?,?,?,?,?)",
+            (raw_post_id, description, severity, source_type, source_url)
         )
         return cur.lastrowid
 
 
-def get_all_themes() -> list[dict]:
+def get_unassigned_pain_points() -> list[dict]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM themes ORDER BY frequency DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM pain_points WHERE cluster_id IS NULL ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def assign_pain_point_to_cluster(pain_point_id: int, cluster_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE pain_points SET cluster_id=? WHERE id=?", (cluster_id, pain_point_id))
+
+
+def get_cluster_pain_points(cluster_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pain_points WHERE cluster_id=? ORDER BY created_at DESC",
+            (cluster_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── clusters ──────────────────────────────────────────────────────────────────
+
+def create_cluster(name: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute("INSERT INTO clusters (name) VALUES (?)", (name,))
+        return cur.lastrowid
+
+
+def get_all_clusters() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM clusters ORDER BY evidence_count DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_cluster_by_id(cluster_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM clusters WHERE id=?", (cluster_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def add_evidence_to_cluster(cluster_id: int, pain_point_id: int, source_type: str):
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        # Add to evidence table (ignore if already linked)
+        conn.execute(
+            "INSERT OR IGNORE INTO cluster_evidence (cluster_id, pain_point_id) VALUES (?,?)",
+            (cluster_id, pain_point_id)
+        )
+        # Recount evidence and source diversity from evidence table
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM cluster_evidence WHERE cluster_id=?",
+            (cluster_id,)
+        ).fetchone()
+        evidence_count = row["cnt"]
+
+        # Recount source breakdown
+        sources = conn.execute("""
+            SELECT pp.source_type, COUNT(*) as cnt
+            FROM cluster_evidence ce
+            JOIN pain_points pp ON pp.id = ce.pain_point_id
+            WHERE ce.cluster_id=?
+            GROUP BY pp.source_type
+        """, (cluster_id,)).fetchall()
+        breakdown = {r["source_type"]: r["cnt"] for r in sources}
+        diversity = len(breakdown)
+
+        conn.execute("""
+            UPDATE clusters SET
+                evidence_count=?, source_diversity=?, source_breakdown=?, last_updated=?
+            WHERE id=?
+        """, (evidence_count, diversity, json.dumps(breakdown), now, cluster_id))
+
+
+def update_cluster_synthesis(cluster_id: int, narrative: str, status: str = None):
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        if status:
+            conn.execute(
+                "UPDATE clusters SET synthesis_narrative=?, status=?, last_updated=? WHERE id=?",
+                (narrative, status, now, cluster_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE clusters SET synthesis_narrative=?, last_updated=? WHERE id=?",
+                (narrative, now, cluster_id)
+            )
+
+
+def get_clusters_needing_synthesis(min_evidence: int = 5) -> list[dict]:
+    """Clusters with enough evidence but no narrative yet, or that have grown since last synthesis."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT c.*
+            FROM clusters c
+            WHERE c.evidence_count >= ?
+            AND c.status IN ('growing', 'mature')
+            ORDER BY c.evidence_count DESC
+        """, (min_evidence,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_mature_clusters_without_backlog(min_evidence: int = 5) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT c.* FROM clusters c
+            LEFT JOIN backlog_items b ON b.cluster_id = c.id
+            WHERE c.evidence_count >= ?
+            AND c.synthesis_narrative IS NOT NULL
+            AND b.id IS NULL
+            AND c.status NOT IN ('built')
+        """, (min_evidence,)).fetchall()
         return [dict(r) for r in rows]
 
 
 # ── backlog items ─────────────────────────────────────────────────────────────
 
-def upsert_backlog_item(theme_id: int, title: str, description: str) -> int:
+def create_backlog_item(cluster_id: int, title: str, description: str) -> int:
     with get_conn() as conn:
-        existing = conn.execute("SELECT id FROM backlog_items WHERE theme_id = ?", (theme_id,)).fetchone()
-        if existing:
-            return existing["id"]
         cur = conn.execute(
-            "INSERT INTO backlog_items (theme_id, title, description) VALUES (?,?,?)",
-            (theme_id, title, description)
+            "INSERT INTO backlog_items (cluster_id, title, description) VALUES (?,?,?)",
+            (cluster_id, title, description)
         )
         return cur.lastrowid
 
@@ -182,9 +314,10 @@ def update_scores(item_id: int, scores: dict):
 def get_pending_backlog(min_score: float = 0.0) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT b.*, t.name as theme_name, t.source_urls
+            SELECT b.*, c.name as cluster_name, c.synthesis_narrative,
+                   c.evidence_count, c.source_diversity, c.source_breakdown
             FROM backlog_items b
-            JOIN themes t ON t.id = b.theme_id
+            JOIN clusters c ON c.id = b.cluster_id
             WHERE b.status = 'pending' AND b.priority_score >= ?
             ORDER BY b.priority_score DESC
         """, (min_score,)).fetchall()
@@ -256,8 +389,7 @@ def record_build(backlog_item_id: int, github_url: str, repo_name: str, summary:
 def get_unnotified_builds() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT bld.*, bi.title
-            FROM builds bld
+            SELECT bld.*, bi.title FROM builds bld
             JOIN backlog_items bi ON bi.id = bld.backlog_item_id
             WHERE bld.notified = 0
         """).fetchall()
@@ -272,10 +404,10 @@ def mark_build_notified(build_id: int):
 def get_builds_for_refinement(after_days: int = 7) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT bld.*, bi.title, bi.description, t.source_urls
+            SELECT bld.*, bi.title, bi.description, c.source_breakdown
             FROM builds bld
             JOIN backlog_items bi ON bi.id = bld.backlog_item_id
-            JOIN themes t ON t.id = bi.theme_id
+            JOIN clusters c ON c.id = bi.cluster_id
             WHERE datetime(bld.created_at) <= datetime('now', ? || ' days')
             AND bi.status = 'built'
         """, (f"-{after_days}",)).fetchall()
@@ -292,40 +424,47 @@ def add_outreach(build_id: int, source_url: str, message: str):
         )
 
 
-def get_pending_outreach() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM outreach WHERE status='pending'").fetchall()
-        return [dict(r) for r in rows]
-
-
 def mark_outreach_sent(outreach_id: int):
-    now = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        conn.execute("UPDATE outreach SET status='sent', sent_at=? WHERE id=?", (now, outreach_id))
+        conn.execute(
+            "UPDATE outreach SET status='sent', sent_at=? WHERE id=?",
+            (datetime.utcnow().isoformat(), outreach_id)
+        )
 
 
-# ── digest ────────────────────────────────────────────────────────────────────
+# ── digest helpers ────────────────────────────────────────────────────────────
 
 def log_digest(summary: str):
     with get_conn() as conn:
         conn.execute("INSERT INTO digest_log (summary) VALUES (?)", (summary,))
 
 
-def get_todays_discoveries() -> list[dict]:
+def get_todays_stats() -> dict:
     with get_conn() as conn:
-        rows = conn.execute("""
-            SELECT * FROM raw_problems
-            WHERE date(created_at) = date('now')
-            ORDER BY created_at DESC
-        """).fetchall()
-        return [dict(r) for r in rows]
+        new_posts = conn.execute(
+            "SELECT COUNT(*) as n FROM raw_posts WHERE date(created_at)=date('now')"
+        ).fetchone()["n"]
+        new_pain_points = conn.execute(
+            "SELECT COUNT(*) as n FROM pain_points WHERE date(created_at)=date('now')"
+        ).fetchone()["n"]
+        updated_clusters = conn.execute(
+            "SELECT COUNT(*) as n FROM clusters WHERE date(last_updated)=date('now')"
+        ).fetchone()["n"]
+        return {
+            "new_posts": new_posts,
+            "new_pain_points": new_pain_points,
+            "updated_clusters": updated_clusters
+        }
 
 
-def get_todays_themes() -> list[dict]:
+def get_top_clusters(limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT * FROM themes
-            WHERE date(updated_at) = date('now')
-            ORDER BY frequency DESC
-        """).fetchall()
+            SELECT c.*, b.priority_score
+            FROM clusters c
+            LEFT JOIN backlog_items b ON b.cluster_id = c.id
+            WHERE c.evidence_count > 0
+            ORDER BY c.evidence_count DESC, c.source_diversity DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
         return [dict(r) for r in rows]

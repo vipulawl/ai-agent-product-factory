@@ -71,29 +71,33 @@ def send_daily_digest():
     log.info("=== Sending daily digest ===")
     try:
         from agents.base import send_telegram
-        from storage.backlog import get_todays_discoveries, get_todays_themes, get_pending_backlog, log_digest
+        from storage.backlog import get_todays_stats, get_top_clusters, get_pending_backlog, log_digest
 
-        discoveries = get_todays_discoveries()
-        themes = get_todays_themes()
-        top_items = get_pending_backlog(min_score=5.0)[:5]
+        stats = get_todays_stats()
+        top_clusters = get_top_clusters(limit=5)
+        top_items = get_pending_backlog(min_score=0.0)[:5]
 
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
         msg = f"📊 *Daily Agent Factory Digest — {date_str}*\n\n"
 
-        msg += f"*Today's Discovery Run*\n"
-        msg += f"  • {len(discoveries)} new posts scraped\n"
-        msg += f"  • {len(themes)} themes updated/added\n\n"
+        msg += f"*Today's Run*\n"
+        msg += f"  • {stats['new_posts']} new posts  •  {stats['new_pain_points']} pain points  •  {stats['updated_clusters']} clusters updated\n\n"
 
-        if themes:
-            msg += "*New/Updated Themes Today*\n"
-            for t in themes[:5]:
-                msg += f"  • {t['name']} ({t['frequency']} mentions)\n"
+        if top_clusters:
+            msg += "*Strongest Clusters (by evidence)*\n"
+            for c in top_clusters:
+                import json as _json
+                bd = _json.loads(c.get("source_breakdown") or "{}")
+                src = "+".join(bd.keys()) if bd else "?"
+                star = " ✨" if c.get("synthesis_narrative") else ""
+                msg += f"  `{c['evidence_count']:2d}` [{src}]  {c['name']}{star}\n"
             msg += "\n"
 
         if top_items:
-            msg += "*Top Backlog Items (to build)*\n"
+            msg += "*Top Buildable Items*\n"
             for it in top_items:
-                msg += f"  {it['priority_score']:.1f}  {it['title']}\n"
+                score_str = f"{it['priority_score']:.1f}" if it["priority_score"] else "  ?"
+                msg += f"  {score_str}  {it['title']}\n"
             msg += "\n"
 
         msg += "_Next build check: tomorrow 9am_"
