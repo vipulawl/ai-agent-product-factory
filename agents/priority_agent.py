@@ -18,7 +18,7 @@ Score these backlog items. Each item includes a synthesis narrative built from r
 
 Scoring (each 0–10):
 - frequency_score: How many developers face this? (use evidence_count as signal — 10+ mentions = 9-10)
-- novelty_score: How underserved is this? Does a good open-source solution exist? (10 = nothing usable exists)
+- novelty_score: How underserved is this? (10 = nothing usable exists; if known_solutions lists tools that are adequate, score ≤ 3; if they exist but are incomplete/inadequate, score 5-7)
 - feasibility_score: Buildable standalone by 1 dev in ~1 week as a useful tool? (10 = very doable)
 - recency_score: Is this being complained about actively right now? (10 = mentioned in last 7 days)
 - market_score: What fraction of AI/agent developers would use this? (10 = everyone building agents)
@@ -81,11 +81,12 @@ def run() -> dict:
             {
                 "item_id": it["id"],
                 "title": it["title"],
-                # Include full narrative so GPT-4o has real signal to score against
                 "synthesis_narrative": (it.get("synthesis_narrative") or it["description"] or "")[:800],
                 "evidence_count": it.get("evidence_count", 0),
                 "source_diversity": it.get("source_diversity", 1),
-                "source_breakdown": it.get("source_breakdown", "{}")
+                "source_breakdown": it.get("source_breakdown", "{}"),
+                # Known solutions affect novelty score — pass them explicitly
+                "known_solutions": json.loads(it.get("known_solutions") or "[]"),
             }
             for it in batch
         ]

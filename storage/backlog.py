@@ -20,14 +20,18 @@ CREATE TABLE IF NOT EXISTS raw_posts (
 
 -- Atomic extracted pain points, one row per complaint
 CREATE TABLE IF NOT EXISTS pain_points (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    raw_post_id INTEGER REFERENCES raw_posts(id),
-    description TEXT NOT NULL,
-    severity    TEXT,                   -- high | medium | low
-    source_type TEXT,
-    source_url  TEXT,
-    cluster_id  INTEGER REFERENCES clusters(id),  -- null until assigned
-    created_at  TEXT DEFAULT (datetime('now'))
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_post_id       INTEGER REFERENCES raw_posts(id),
+    description       TEXT NOT NULL,
+    severity          TEXT,                    -- high | medium | low
+    source_type       TEXT,
+    source_url        TEXT,
+    is_promotional    INTEGER DEFAULT 0,       -- 1 if post was plugging a solution
+    solution_mentioned TEXT,                   -- name of solution mentioned in post/comments, if any
+    solution_adequate  INTEGER DEFAULT 0,      -- 1 if the mentioned solution actually solves it well
+    comment_signal    TEXT,                    -- notable quotes from comments (JSON array)
+    cluster_id        INTEGER REFERENCES clusters(id),
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 -- Each cluster is a synthesised problem theme built up over many runs
@@ -36,8 +40,10 @@ CREATE TABLE IF NOT EXISTS clusters (
     name                 TEXT NOT NULL,
     synthesis_narrative  TEXT,          -- GPT-4o written brief, updated as evidence grows
     evidence_count       INTEGER DEFAULT 0,
-    source_diversity     INTEGER DEFAULT 0,  -- count of distinct source_types contributing
+    promo_count          INTEGER DEFAULT 0,   -- how many evidence pieces were promotional posts
+    source_diversity     INTEGER DEFAULT 0,
     source_breakdown     TEXT DEFAULT '{}',  -- JSON: {"reddit":5,"hackernews":2,"github":1}
+    known_solutions      TEXT DEFAULT '[]',  -- JSON: [{"name":"LangSmith","adequate":false,"why_not":"no replay"}]
     first_seen           TEXT DEFAULT (datetime('now')),
     last_updated         TEXT DEFAULT (datetime('now')),
     status               TEXT DEFAULT 'growing'  -- growing | mature | ready_to_build | built
@@ -118,6 +124,24 @@ def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn):
+    """Add columns introduced after initial schema without dropping existing data."""
+    migrations = [
+        ("pain_points", "is_promotional",    "INTEGER DEFAULT 0"),
+        ("pain_points", "solution_mentioned", "TEXT"),
+        ("pain_points", "solution_adequate",  "INTEGER DEFAULT 0"),
+        ("pain_points", "comment_signal",     "TEXT"),
+        ("clusters",    "promo_count",        "INTEGER DEFAULT 0"),
+        ("clusters",    "known_solutions",    "TEXT DEFAULT '[]'"),
+    ]
+    for table, col, col_def in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 @contextmanager
@@ -159,11 +183,20 @@ def insert_raw_post(source_type: str, source_url: str, title: str, content: str)
 # ── pain points ───────────────────────────────────────────────────────────────
 
 def insert_pain_point(raw_post_id: int, description: str, severity: str,
-                       source_type: str, source_url: str) -> int:
+                       source_type: str, source_url: str,
+                       is_promotional: bool = False,
+                       solution_mentioned: str = None,
+                       solution_adequate: bool = False,
+                       comment_signal: list = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO pain_points (raw_post_id, description, severity, source_type, source_url) VALUES (?,?,?,?,?)",
-            (raw_post_id, description, severity, source_type, source_url)
+            """INSERT INTO pain_points
+               (raw_post_id, description, severity, source_type, source_url,
+                is_promotional, solution_mentioned, solution_adequate, comment_signal)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (raw_post_id, description, severity, source_type, source_url,
+             int(is_promotional), solution_mentioned, int(solution_adequate),
+             json.dumps(comment_signal or []))
         )
         return cur.lastrowid
 
@@ -213,19 +246,17 @@ def get_cluster_by_id(cluster_id: int) -> dict | None:
 def add_evidence_to_cluster(cluster_id: int, pain_point_id: int, source_type: str):
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        # Add to evidence table (ignore if already linked)
         conn.execute(
             "INSERT OR IGNORE INTO cluster_evidence (cluster_id, pain_point_id) VALUES (?,?)",
             (cluster_id, pain_point_id)
         )
-        # Recount evidence and source diversity from evidence table
+        # Recount everything from source tables so counts are always accurate
         row = conn.execute(
             "SELECT COUNT(*) as cnt FROM cluster_evidence WHERE cluster_id=?",
             (cluster_id,)
         ).fetchone()
         evidence_count = row["cnt"]
 
-        # Recount source breakdown
         sources = conn.execute("""
             SELECT pp.source_type, COUNT(*) as cnt
             FROM cluster_evidence ce
@@ -234,13 +265,35 @@ def add_evidence_to_cluster(cluster_id: int, pain_point_id: int, source_type: st
             GROUP BY pp.source_type
         """, (cluster_id,)).fetchall()
         breakdown = {r["source_type"]: r["cnt"] for r in sources}
-        diversity = len(breakdown)
+
+        promo_row = conn.execute("""
+            SELECT COUNT(*) as cnt
+            FROM cluster_evidence ce
+            JOIN pain_points pp ON pp.id = ce.pain_point_id
+            WHERE ce.cluster_id=? AND pp.is_promotional=1
+        """, (cluster_id,)).fetchone()
 
         conn.execute("""
             UPDATE clusters SET
-                evidence_count=?, source_diversity=?, source_breakdown=?, last_updated=?
+                evidence_count=?, source_diversity=?, source_breakdown=?,
+                promo_count=?, last_updated=?
             WHERE id=?
-        """, (evidence_count, diversity, json.dumps(breakdown), now, cluster_id))
+        """, (evidence_count, len(breakdown), json.dumps(breakdown),
+              promo_row["cnt"], now, cluster_id))
+
+
+def merge_known_solutions(cluster_id: int, new_solutions: list[dict]):
+    """Merge newly discovered solutions into the cluster's known_solutions list (no duplicates)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT known_solutions FROM clusters WHERE id=?", (cluster_id,)).fetchone()
+        existing = json.loads(row["known_solutions"] or "[]") if row else []
+        existing_names = {s["name"].lower() for s in existing}
+        for sol in new_solutions:
+            if sol.get("name", "").lower() not in existing_names:
+                existing.append(sol)
+                existing_names.add(sol["name"].lower())
+        conn.execute("UPDATE clusters SET known_solutions=? WHERE id=?",
+                     (json.dumps(existing), cluster_id))
 
 
 def update_cluster_synthesis(cluster_id: int, narrative: str, status: str = None):
@@ -315,7 +368,8 @@ def get_pending_backlog(min_score: float = 0.0) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT b.*, c.name as cluster_name, c.synthesis_narrative,
-                   c.evidence_count, c.source_diversity, c.source_breakdown
+                   c.evidence_count, c.source_diversity, c.source_breakdown,
+                   c.known_solutions, c.promo_count
             FROM backlog_items b
             JOIN clusters c ON c.id = b.cluster_id
             WHERE b.status = 'pending' AND b.priority_score >= ?
